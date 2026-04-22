@@ -17,6 +17,42 @@ import path from 'path';
 
 const BUILDS_DIR = process.env.BUILDS_DIR ?? '/tmp/brimble-builds';
 
+// ── Subdirectory URL detection ─────────────────────────────────────────────
+//
+// GitHub: https://github.com/user/repo/tree/branch/path/to/subdir
+// GitLab: https://gitlab.com/user/repo/-/tree/branch/path/to/subdir
+//
+// When a tree URL is detected we do a git sparse-checkout instead of a full
+// clone — only the specified subdirectory is downloaded, keeping it fast.
+// The returned source directory is <cloneRoot>/<subdir> so Railpack sees
+// only the app code, not the rest of the repo.
+
+interface SubdirInfo {
+  cloneUrl: string;
+  branch: string;
+  subdir: string;
+}
+
+export function parseTreeUrl(url: string): SubdirInfo | null {
+  // GitHub: https://github.com/user/repo/tree/branch/subdir
+  const github = url.match(
+    /^(https:\/\/github\.com\/[\w.-]+\/[\w.-]+)\/tree\/([^/]+)\/(.+)$/,
+  );
+  if (github) {
+    return { cloneUrl: github[1], branch: github[2], subdir: github[3] };
+  }
+
+  // GitLab: https://gitlab.com/user/repo/-/tree/branch/subdir
+  const gitlab = url.match(
+    /^(https:\/\/gitlab\.com\/[\w.-]+\/[\w.-]+)\/-\/tree\/([^/]+)\/(.+)$/,
+  );
+  if (gitlab) {
+    return { cloneUrl: gitlab[1], branch: gitlab[2], subdir: gitlab[3] };
+  }
+
+  return null;
+}
+
 export async function resolveGitSource(
   deploymentId: string,
   gitUrl: string,
@@ -25,10 +61,46 @@ export async function resolveGitSource(
   const targetDir = path.join(BUILDS_DIR, deploymentId, 'src');
   await mkdir(targetDir, { recursive: true });
 
-  const cloneUrl = injectToken(gitUrl);
-  const displayUrl = gitUrl; // never log the token-injected URL
+  const subdirInfo = parseTreeUrl(gitUrl);
 
-  onLog(`[source] Cloning repository: ${displayUrl}`);
+  if (subdirInfo) {
+    // ── Sparse checkout: only download the specified subdirectory ──────────
+    const cloneUrl = injectToken(subdirInfo.cloneUrl);
+    onLog(`[source] Detected subdirectory URL`);
+    onLog(`[source] Repository: ${subdirInfo.cloneUrl}`);
+    onLog(`[source] Branch: ${subdirInfo.branch}`);
+    onLog(`[source] Subdirectory: ${subdirInfo.subdir}`);
+
+    // Clone with blob filter + sparse (no working tree yet)
+    await runCommand(
+      'git',
+      [
+        'clone',
+        '--depth', '1',
+        '--filter=blob:none',
+        '--sparse',
+        '--branch', subdirInfo.branch,
+        cloneUrl,
+        targetDir,
+      ],
+      onLog,
+    );
+
+    // Tell sparse-checkout which path to materialise
+    await runCommand(
+      'git',
+      ['-C', targetDir, 'sparse-checkout', 'set', subdirInfo.subdir],
+      onLog,
+    );
+
+    const buildDir = path.join(targetDir, subdirInfo.subdir);
+    onLog(`[source] Sparse checkout complete — building from: ${subdirInfo.subdir}/`);
+    return buildDir;
+  }
+
+  // ── Normal full clone ──────────────────────────────────────────────────
+  const cloneUrl = injectToken(gitUrl);
+  onLog(`[source] Cloning repository: ${gitUrl}`);
   onLog(`[source] Target directory: ${targetDir}`);
 
   await runCommand(

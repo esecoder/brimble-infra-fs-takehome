@@ -47,6 +47,15 @@ curl -X POST http://localhost/api/deployments \
 
 Or just paste `https://github.com/<your-fork>/blob/main/sample-app` into the Git URL field.
 
+Or paste a **subdirectory tree URL** directly into the Git URL field — the pipeline detects it and does a sparse checkout automatically:
+
+```
+https://github.com/esecoder/brimble-infra-fs-takehome/tree/main/sample-app
+```
+
+> Subdirectory URLs work for both GitHub (`/tree/branch/path`) and GitLab (`/-/tree/branch/path`).
+
+
 ---
 
 ## Architecture
@@ -83,11 +92,15 @@ Railpack drives Docker's **BuildKit** to produce container images. Running the A
 
 Container images built by Railpack are stored in DinD's image store. When we start a deployed container with `-p <port>:3000`, that port is bound on the DinD container's network interfaces, which are reachable by Caddy (on the same bridge network) at `dind:<port>`.
 
-### Why Caddy over nginx?
+### Caddy — advantages for this use case
 
-- **JSON Admin API** — we POST the full config to `:2019/load` and Caddy swaps it atomically with zero-downtime. No reload commands, no restart, no race conditions.
-- **In-memory config** — the API owns the authoritative config object, mutates it on each deployment event, and POSTs it. Simple and predictable.
-- **Readable config format** — the `Caddyfile` is human-readable and the JSON is well-documented.
+Caddy is prescribed by the assignment spec as the ingress layer. It turns out to be particularly well-suited:
+
+- **JSON Admin API** — we POST the full config to `:2019/load` and Caddy swaps it atomically with zero downtime. No file reloads, no service restarts, no race conditions between concurrent deploys.
+- **In-memory config managed by the API** — the `caddy.ts` service owns the authoritative config object, mutates it on each deployment event, and re-POSTs it. State stays in one place.
+- **Readable Caddyfile format** — the base config is a few lines; the dynamic per-deployment routes are pure JSON injected at runtime.
+- **Graceful config validation** — Caddy validates the new config before applying it. If a bad route is submitted, the current config keeps serving traffic uninterrupted.
+
 
 ### Why Hono?
 
@@ -159,6 +172,34 @@ The API automatically injects the token into the HTTPS clone URL. The token is n
 
 ---
 
+## Testing
+
+Tests live in `apps/api/src/__tests__/`. Run them with:
+
+```bash
+cd apps/api
+npm test          # single run
+npm run test:watch  # re-runs on file change
+```
+
+**Test runner:** [Vitest](https://vitest.dev/) — ESM-native, zero config, vitest is hoisted before imports so `vi.mock()` works cleanly with our module graph.
+
+### What's covered and why
+
+| File | Suite | Tests | Rationale |
+|---|---|---|---|
+| `source.test.ts` | `parseTreeUrl` | 10 | Pure function — covers GitHub, GitLab, nested paths, non-tree URLs, `.git` URLs, blob URLs. No I/O needed. |
+| `logStore.test.ts` | `logStore` | 8 | The SSE backbone — verifies emitter creation, single/multi-subscriber delivery, `done` event, and post-close liveness (critical for the SSE drain loop). |
+| `routes.test.ts` | API routes | 12 | Input validation before the pipeline is touched, 404 behaviour, list/get/create/delete happy paths. DB and pipeline are mocked so no SQLite or Docker needed. |
+
+**What's intentionally not unit-tested:**
+- `builder.ts` — wraps the `railpack` CLI; integration-tested end-to-end via `docker compose up`
+- `runner.ts` — wraps Dockerode/DinD; same reasoning
+- `caddy.ts` — calls the Caddy Admin API; verified through live `docker compose up` testing
+- SSE stream endpoint — the drain-loop logic requires a live EventSource connection; covered by manual testing
+
+---
+
 ## API Reference
 
 | Method | Path | Description |
@@ -222,11 +263,11 @@ curl -N http://localhost/api/deployments/<id>/logs/stream
 | Phase | Hours |
 |---|---|
 | Architecture research (Railpack, Caddy Admin API, DinD networking) | ~2h |
-| API + pipeline + services | ~4h |
+| API + pipeline + services | ~3h |
 | Frontend (components, TanStack wiring, SSE hook, CSS) | ~3h |
 | Docker Compose + Caddy config iteration | ~1h |
 | README + polish | ~1h |
-| **Total** | **~11h** |
+| **Total** | **~10h** |
 
 ---
 
