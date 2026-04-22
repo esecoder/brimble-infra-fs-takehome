@@ -10,8 +10,8 @@ version: "3.9"
 services:
 
   # ── Docker-in-Docker daemon ───────────────────────────────────────────────
-  # Runs a nested Docker daemon so the API container can build images
-  # and run containers without touching the host socket.
+  # Runs a nested Docker daemon used by Dockerode to start/stop deployed
+  # containers. Does NOT build images — that is BuildKit's job.
   # --privileged is required for DinD.
   dind:
     image: docker:27-dind
@@ -31,6 +31,24 @@ services:
       start_period: 15s
     restart: unless-stopped
 
+  # ── BuildKit daemon ───────────────────────────────────────────────────────
+  # Railpack requires BuildKit as its build backend (BUILDKIT_HOST).
+  # Listens on TCP 1234 so the API container can reach it by name.
+  # Built images are exported via the Docker exporter into DinD (DOCKER_HOST)
+  # so Dockerode can start containers from them.
+  buildkitd:
+    image: moby/buildkit:latest
+    container_name: brimble-buildkitd
+    privileged: true
+    command:
+      - --addr
+      - tcp://0.0.0.0:1234
+    volumes:
+      - buildkit-cache:/var/lib/buildkit   # layer cache persists across rebuilds
+    networks:
+      - brimble
+    restart: unless-stopped
+
   # ── Hono TypeScript API ───────────────────────────────────────────────────
   api:
     build:
@@ -41,7 +59,10 @@ services:
       NODE_ENV: production
       PORT: "3001"
       DATABASE_URL: /data/brimble.db
+      # DinD — Dockerode uses this to start/stop deployed containers
       DOCKER_HOST: tcp://dind:2375
+      # BuildKit — Railpack uses this to build container images
+      BUILDKIT_HOST: tcp://buildkitd:1234
       CADDY_ADMIN_URL: http://caddy:2019
       DEPLOY_BASE_PORT: "4000"
       BUILDS_DIR: /builds
@@ -56,6 +77,8 @@ services:
     depends_on:
       dind:
         condition: service_healthy
+      buildkitd:
+        condition: service_started
     restart: unless-stopped
 
   # ── Vite SPA (built + served by Caddy) ───────────────────────────────────
@@ -93,8 +116,9 @@ networks:
     driver: bridge
 
 volumes:
-  dind-storage:   # DinD image/layer cache
-  api-data:       # SQLite DB
-  api-builds:     # ephemeral build scratch space
-  caddy-data:     # Caddy TLS certs / data
-  caddy-config:   # Caddy runtime config
+  dind-storage:     # DinD image/layer cache (for running containers)
+  buildkit-cache:   # BuildKit layer cache (for fast rebuilds)
+  api-data:         # SQLite DB
+  api-builds:       # ephemeral build scratch space
+  caddy-data:       # Caddy TLS certs / data
+  caddy-config:     # Caddy runtime config
