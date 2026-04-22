@@ -1,0 +1,12 @@
+{
+  "name": "sample-app",
+  "version": "1.0.0",
+  "description": "Hello-world Node.js app — used to demo the Brimble deployment pipeline",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

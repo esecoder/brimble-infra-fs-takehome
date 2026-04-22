@@ -1,0 +1,40 @@
+# ──────────────────────────────────────────────────────────────────────────
+# Brimble — Base Caddyfile
+#
+# This file provides the static foundation only:
+#   /api/*   → Hono API (port 3001)
+#   /*       → Vite SPA (port 5173)
+#
+# Deployment-specific routes (/deploys/:id/*) are injected at runtime
+# by the API via the Caddy Admin API (POST :2019/load with full JSON config).
+# The API holds the authoritative in-memory config and merges routes into it.
+# ──────────────────────────────────────────────────────────────────────────
+
+{
+  # Expose admin API on all interfaces so the brimble-api container can reach it
+  admin 0.0.0.0:2019
+
+  # Disable automatic HTTPS — we're running locally over HTTP
+  auto_https off
+
+  log {
+    level INFO
+  }
+}
+
+:80 {
+  log {
+    output stdout
+    format console
+  }
+
+  # API traffic
+  handle /api/* {
+    reverse_proxy api:3001
+  }
+
+  # Frontend catch-all
+  handle {
+    reverse_proxy web:5173
+  }
+}

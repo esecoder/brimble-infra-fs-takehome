@@ -1,0 +1,100 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────
+#  Brimble Deployment Pipeline — docker-compose
+# ─────────────────────────────────────────────
+# Bring everything up with:  docker compose up --build
+# Prerequisites: Docker Engine ≥ 24 + Docker Compose v2
+# ─────────────────────────────────────────────
+
+services:
+
+  # ── Docker-in-Docker daemon ───────────────────────────────────────────────
+  # Runs a nested Docker daemon so the API container can build images
+  # and run containers without touching the host socket.
+  # --privileged is required for DinD.
+  dind:
+    image: docker:27-dind
+    container_name: brimble-dind
+    privileged: true
+    environment:
+      DOCKER_TLS_CERTDIR: ""       # disable TLS — plain TCP inside the compose network
+    volumes:
+      - dind-storage:/var/lib/docker
+    networks:
+      - brimble
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 15s
+    restart: unless-stopped
+
+  # ── Hono TypeScript API ───────────────────────────────────────────────────
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: brimble-api
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      DATABASE_URL: /data/brimble.db
+      DOCKER_HOST: tcp://dind:2375
+      CADDY_ADMIN_URL: http://caddy:2019
+      DEPLOY_BASE_PORT: "4000"
+      BUILDS_DIR: /builds
+      # Optional: set to clone private GitHub/GitLab repos
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+    volumes:
+      - api-data:/data        # SQLite database
+      - api-builds:/builds    # temporary build directories
+    networks:
+      - brimble
+    depends_on:
+      dind:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── Vite SPA (built + served by Caddy) ───────────────────────────────────
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: brimble-web
+    networks:
+      - brimble
+    restart: unless-stopped
+
+  # ── Caddy reverse proxy (single ingress point) ────────────────────────────
+  # Serves frontend, proxies /api/* to the API, and dynamically routes
+  # /deploys/:id/* to each deployed container running inside DinD.
+  caddy:
+    image: caddy:2-alpine
+    container_name: brimble-caddy
+    ports:
+      - "80:80"
+      - "2019:2019"   # Admin API — used by brimble-api to inject deployment routes
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - brimble
+    depends_on:
+      - api
+      - web
+    restart: unless-stopped
+
+networks:
+  brimble:
+    driver: bridge
+
+volumes:
+  dind-storage:   # DinD image/layer cache
+  api-data:       # SQLite DB
+  api-builds:     # ephemeral build scratch space
+  caddy-data:     # Caddy TLS certs / data
+  caddy-config:   # Caddy runtime config
